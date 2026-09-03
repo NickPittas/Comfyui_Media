@@ -31,19 +31,19 @@ node = mod.MediaLoadVideoSequence
 
 
 def _run(source_mode="path", video_file="", path="", first_frame=0, last_frame=-1,
-         output_fps=25.0, preset="None", pad_multiple="2", pad_color="#000000"):
+         output_fps=25.0, preset="None", pad_multiple="2", pad_color="#000000", reverse=False):
     return node.execute(source_mode=source_mode, video_file=video_file, path=path,
                         first_frame=first_frame, last_frame=last_frame,
                         output_fps=output_fps, preset=preset,
-                        pad_multiple=pad_multiple, pad_color=pad_color)
+                        pad_multiple=pad_multiple, pad_color=pad_color, reverse=reverse)
 
 
 def _validate(path="/tmp", first_frame=0, last_frame=-1, output_fps=25.0, preset="None",
-              pad_multiple="2", pad_color="#000000", source_mode="path", video_file=""):
+              pad_multiple="2", pad_color="#000000", source_mode="path", video_file="", reverse=False):
     return node.validate_inputs(source_mode=source_mode, video_file=video_file, path=path,
                                 first_frame=first_frame, last_frame=last_frame,
                                 output_fps=output_fps, preset=preset,
-                                pad_multiple=pad_multiple, pad_color=pad_color)
+                                pad_multiple=pad_multiple, pad_color=pad_color, reverse=reverse)
 
 
 def _png(path, w, h, rgb):
@@ -200,6 +200,26 @@ def test_audio_output():
     return "selected audio trimmed and pitch-preserving stretched to generated duration"
 
 
+def test_reverse():
+    with tempfile.TemporaryDirectory() as d:
+        for index, value in enumerate((0, 40, 80, 120)):
+            _png(os.path.join(d, f"frame{index}.png"), 8, 8, (value, value, value))
+        out = _run(path=d, preset="WAN", reverse=True)
+        means = out.result[0].numpy().mean(axis=(1, 2, 3))
+        expected = np.array([120, 80, 40, 0, 0], dtype=np.float32) / 255
+        assert np.allclose(means, expected, atol=1e-6), means
+        assert not np.count_nonzero(out.result[5]["waveform"].numpy())
+
+        path = os.path.join(d, "video.mp4")
+        _make_mp4(path, count=4)
+        video = _run(path=path, preset="WAN", reverse=True).result[0].numpy()
+        video_means = video.mean(axis=(1, 2, 3))
+        assert np.all(np.diff(video_means[:4]) < 0), video_means
+        assert np.allclose(video[4], video[3]), video_means
+    assert "reverse must be boolean" in _validate(reverse="yes")
+    return "video and sequence reverse; aligned tail freezes first source frame; audio silent"
+
+
 def test_rotation():
     a = np.arange(2 * 3 * 3, dtype=np.float32).reshape(2, 3, 3)
     assert np.array_equal(mod._apply_rotation(a, 0), a)
@@ -282,7 +302,7 @@ def test_frame_range_and_duration():
         status = out.ui["text"][0]
         assert "original duration: 10 frames" in status
         assert "selected source range: 2-5 (4 frames)" in status
-        assert "generated duration: 4 frames (None) / 0.160s" in status
+        assert "generated duration: 4 frames (None, forward) / 0.160s" in status
         info = dict(out.ui["media_range"][0])
         preview_url = info.pop("preview_url")
         assert preview_url is None
@@ -290,6 +310,7 @@ def test_frame_range_and_duration():
             "source_fps": None, "source_count": 10, "first_frame": 2,
             "source_last_frame": 5, "snapped_last_frame": 5,
             "selected_count": 4, "generated_count": 4, "output_fps": 25.0,
+            "reverse": False,
         }, info
 
         out = _run(path=d, first_frame=2, last_frame=5, preset="WAN")
@@ -361,7 +382,7 @@ def test_schema():
     assert schema.node_id == "MediaLoadVideoSequence"
     ids = [i.id for i in schema.inputs]
     assert ids == ["source_mode", "video_file", "path", "first_frame", "last_frame",
-                   "output_fps", "preset", "pad_multiple", "pad_color"], ids
+                   "output_fps", "preset", "pad_multiple", "pad_color", "reverse"], ids
     assert [o.id for o in schema.outputs] == [None, "fps", "frame_count", "width", "height", "audio"]
     for i in schema.inputs:
         json.dumps(i.as_dict())
@@ -369,7 +390,7 @@ def test_schema():
         json.dumps(o.as_dict())
     ofps = [i for i in schema.inputs if i.id == "output_fps"][0]
     assert ofps.default == 25.0, ofps.default
-    return "node_id + 9 inputs + 6 outputs including AUDIO; schema serializable"
+    return "node_id + 10 inputs + 6 outputs including AUDIO; schema serializable"
 
 
 def test_static():
@@ -383,6 +404,7 @@ def test_static():
     assert 'fetch("/media-loader/probe"' in web and 'addEventListener("timeupdate", enforceRange)' in web
     assert "Inspecting source" in web and "live.probe()" in web
     assert 'seekInput.ariaLabel = "Preview timeline"' in web
+    assert "reverseAnimation = requestAnimationFrame(tick)" in web
     assert 'position: "static"' in web and 'position: "absolute", left: "8px"' not in web
     assert "repairLegacyWidgetValues(this)" in web
     assert 'fileInput.accept = ".mov,.mp4,video/quicktime,video/mp4"' in web
@@ -423,7 +445,7 @@ def test_ui_smoke():
 
 TESTS = [
     test_natural_sort, test_tiff, test_exr_clamp, test_invalid_sequence,
-    test_mp4, test_audio_output, test_rotation, test_highbit_alignment, test_highbit_policy,
+    test_mp4, test_audio_output, test_reverse, test_rotation, test_highbit_alignment, test_highbit_policy,
     test_fps_independence, test_frame_range_and_duration, test_output_fps_validation, test_padding,
     test_alpha_composite, test_schema, test_static, test_broken_chapter_proxy,
     test_arch_path_mode, test_ui_smoke,

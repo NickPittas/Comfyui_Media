@@ -73,7 +73,7 @@ function renderInfo(node, info) {
         ]),
     );
     const selection = document.createElement("div");
-    selection.textContent = `IN ${info.first_frame}  ·  OUT ${info.source_last_frame}  ·  ${info.preset}`;
+    selection.textContent = `IN ${info.first_frame}  ·  OUT ${info.source_last_frame}  ·  ${info.preset}  ·  ${info.reverse ? "REVERSE" : "FORWARD"}`;
     Object.assign(selection.style, {
         marginTop: "7px", paddingTop: "6px", borderTop: "1px solid var(--border-color, #444)",
         textAlign: "center", opacity: "0.82", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
@@ -90,6 +90,8 @@ function repairLegacyWidgetValues(node) {
     const colors = node.widgets?.filter((item) => item.name === "pad_color") ?? [];
     const valid = colors.map((item) => item.value).find((value) => /^#[0-9a-f]{6}$/i.test(value)) ?? "#000000";
     for (const color of colors) color.value = valid;
+    const reverse = widget(node, "reverse");
+    if (reverse && typeof reverse.value !== "boolean") reverse.value = false;
 }
 
 function installVideoUploadPicker(node) {
@@ -217,6 +219,7 @@ function installLiveMedia(node) {
     previewWidget.computeLayoutSize = () => ({ minHeight: previewVisible ? 228 : 0, minWidth: 360 });
     let frameCallback;
     let holdAnimation;
+    let reverseAnimation;
     let controlsBar;
     let playButton;
     let muteButton;
@@ -247,19 +250,27 @@ function installLiveMedia(node) {
         clearTimeout(loopTimer);
         loopTimer = undefined;
         if (holdAnimation) cancelAnimationFrame(holdAnimation);
+        if (reverseAnimation !== undefined) cancelAnimationFrame(reverseAnimation);
         holdAnimation = undefined;
+        reverseAnimation = undefined;
     };
     const updateControls = () => {
-        const playing = !video.paused || Boolean(loopTimer);
+        const playing = !video.paused || Boolean(loopTimer) || reverseAnimation !== undefined;
         if (playButton) {
             playButton.textContent = playing ? "⏸" : "▶";
             playButton.title = playing ? "Pause" : "Play";
         }
         if (muteButton) {
             muteButton.textContent = video.muted || video.volume === 0 ? "🔇" : "🔊";
-            muteButton.title = video.muted ? "Unmute" : "Mute";
+            muteButton.title = info?.reverse ? "Reverse preview is muted" : video.muted ? "Unmute" : "Mute";
+            muteButton.disabled = Boolean(info?.reverse);
+            muteButton.style.opacity = info?.reverse ? "0.45" : "1";
         }
-        if (volumeInput) volumeInput.value = String(video.volume);
+        if (volumeInput) {
+            volumeInput.value = String(video.volume);
+            volumeInput.disabled = Boolean(info?.reverse);
+            volumeInput.style.opacity = info?.reverse ? "0.45" : "1";
+        }
     };
     const updateTime = (elapsed) => {
         const duration = generatedDuration();
@@ -270,17 +281,16 @@ function installLiveMedia(node) {
     const seekToElapsed = (elapsed) => {
         const bounds = range();
         if (!bounds) return;
-        const sourceTime = bounds.start + elapsed * (video.playbackRate || 1);
+        const direction = info?.reverse ? -1 : 1;
+        const origin = info?.reverse ? bounds.last : bounds.start;
+        const sourceTime = origin + direction * elapsed * (video.playbackRate || 1);
         video.currentTime = Math.min(bounds.last, Math.max(bounds.start, sourceTime));
         updateTime(elapsed);
     };
     const restartAtStart = () => {
-        const bounds = range();
         clearLoop();
-        if (!bounds) return;
-        video.currentTime = bounds.start;
         updateTime(0);
-        video.play().catch(() => updateControls());
+        playFromElapsed(0);
     };
     const holdThenRestart = (elapsed) => {
         const duration = generatedDuration();
@@ -305,7 +315,22 @@ function installLiveMedia(node) {
         if (elapsed >= duration - 0.001) elapsed = 0;
         if (elapsed >= selectedDuration() - 0.001) return holdThenRestart(elapsed);
         seekToElapsed(elapsed);
-        video.play().catch(() => updateControls());
+        if (!info?.reverse) return video.play().catch(() => updateControls());
+        video.pause();
+        const started = performance.now();
+        const initial = elapsed;
+        const tick = (now) => {
+            if (reverseAnimation === undefined) return;
+            const current = initial + (now - started) / 1000;
+            if (current >= selectedDuration() - 0.001) {
+                reverseAnimation = undefined;
+                return holdThenRestart(selectedDuration());
+            }
+            seekToElapsed(current);
+            reverseAnimation = requestAnimationFrame(tick);
+        };
+        reverseAnimation = requestAnimationFrame(tick);
+        updateControls();
     };
 
     const attachControls = () => {
@@ -344,17 +369,17 @@ function installLiveMedia(node) {
         for (const eventName of ["pointerdown", "mousedown", "click", "dblclick", "wheel"])
             controlsBar.addEventListener(eventName, (event) => event.stopPropagation());
         playButton.addEventListener("click", () => {
-            if (!video.paused || loopTimer) {
+            if (!video.paused || loopTimer || reverseAnimation !== undefined) {
                 clearLoop(); video.pause(); updateControls();
             } else playFromElapsed(Number(seekInput.value));
         });
         seekInput.addEventListener("pointerdown", () => {
-            resumeAfterScrub = !video.paused || Boolean(loopTimer);
+            resumeAfterScrub = !video.paused || Boolean(loopTimer) || reverseAnimation !== undefined;
             scrubbing = true; clearLoop(); video.pause();
         });
         seekInput.addEventListener("input", () => {
             if (!scrubbing) {
-                resumeAfterScrub = !video.paused || Boolean(loopTimer);
+                resumeAfterScrub = !video.paused || Boolean(loopTimer) || reverseAnimation !== undefined;
                 scrubbing = true; clearLoop(); video.pause();
             }
             seekToElapsed(Number(seekInput.value));
@@ -384,7 +409,7 @@ function installLiveMedia(node) {
     };
     const enforceRange = () => {
         const bounds = range();
-        if (!bounds || loopTimer || scrubbing) return;
+        if (!bounds || loopTimer || scrubbing || info?.reverse) return;
         if (video.currentTime < bounds.start - 0.001) video.currentTime = bounds.start;
         updateTime(Math.max(0, (video.currentTime - bounds.start) / (video.playbackRate || 1)));
         if (video.currentTime >= bounds.end - 0.001) restart();
@@ -408,14 +433,14 @@ function installLiveMedia(node) {
         if (video.src !== url) video.src = url;
         video.controls = false;
         video.loop = false;
-        video.autoplay = true;
+        video.autoplay = !info.reverse;
         video.playbackRate = Math.min(16, Math.max(0.0625, info.output_fps / info.source_fps));
+        if (info.reverse) video.muted = true;
         seekInput.max = String(generatedDuration());
         seekInput.value = "0";
-        const bounds = range();
-        if (bounds) video.currentTime = bounds.start;
-        updateTime(0);
-        video.play().catch(() => updateControls());
+        seekToElapsed(0);
+        updateControls();
+        playFromElapsed(0);
     };
 
     video.addEventListener("timeupdate", enforceRange);
@@ -435,6 +460,7 @@ function installLiveMedia(node) {
         output_fps: Number(widget(node, "output_fps").value),
         preset: widget(node, "preset").value,
         pad_multiple: widget(node, "pad_multiple").value,
+        reverse: Boolean(widget(node, "reverse")?.value),
     });
 
     const probe = () => {
@@ -459,7 +485,7 @@ function installLiveMedia(node) {
         }, 150);
     };
 
-    for (const name of ["source_mode", "video_file", "path", "output_fps", "pad_multiple"]) {
+    for (const name of ["source_mode", "video_file", "path", "output_fps", "pad_multiple", "reverse"]) {
         const input = widget(node, name);
         const callback = input.callback;
         input.callback = function (value, ...args) {

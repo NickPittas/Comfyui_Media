@@ -2,3 +2,7 @@ __pycache__/
 *.py[cod]
 .pi/
 progress.md
+
+# Pix Agent
+.pi/
+.pi-lens/

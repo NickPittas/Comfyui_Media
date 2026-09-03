@@ -424,6 +424,7 @@ def _live_source(source_mode, video_file, path):
 def _live_metadata(data):
     first_frame, last_frame = data["first_frame"], data["last_frame"]
     output_fps = data["output_fps"]
+    reverse = data.get("reverse", False)
     preset, multiple = data["preset"], int(data["pad_multiple"])
     if (not isinstance(first_frame, int) or isinstance(first_frame, bool) or first_frame < 0
             or not isinstance(last_frame, int) or isinstance(last_frame, bool) or last_frame < -1):
@@ -435,6 +436,8 @@ def _live_metadata(data):
         raise ValueError("output_fps must be positive and finite")
     if preset not in ("None", "WAN", "LTX 2.3") or multiple not in (2, 8, 16, 32, 64):
         raise ValueError("invalid preset or pad_multiple")
+    if not isinstance(reverse, bool):
+        raise ValueError("reverse must be boolean")
 
     source = _live_source(data["source_mode"], data.get("video_file", ""), data.get("path", ""))
     if os.path.isdir(source):
@@ -463,8 +466,9 @@ def _live_metadata(data):
             source_count, source_seconds_text, source_w, source_h, source_fps_text)
         + "SELECTED: frames {}-{} | {} source frames | snapped last {}\n".format(
             range_first, range_last, selected_count, requested_last)
-        + "GENERATED: {} frames / {:.3f}s | {}x{} | fps {} | {}".format(
-            generated_count, generated_seconds, generated_w, generated_h, output_fps, preset)
+        + "GENERATED: {} frames / {:.3f}s | {}x{} | fps {} | {} | {}".format(
+            generated_count, generated_seconds, generated_w, generated_h, output_fps, preset,
+            "reverse" if reverse else "forward")
     )
     return {
         "status": status, "kind": kind, "preview_url": preview_url,
@@ -474,7 +478,7 @@ def _live_metadata(data):
         "snapped_last_frame": requested_last, "selected_count": selected_count,
         "generated_count": generated_count, "generated_duration": generated_seconds,
         "generated_width": generated_w, "generated_height": generated_h,
-        "output_fps": float(output_fps), "preset": preset,
+        "output_fps": float(output_fps), "preset": preset, "reverse": reverse,
     }
 
 
@@ -551,7 +555,7 @@ def _allocate_canvas(count_final, Hp, Wp, pad_rgb):
 
 
 def _video_decode_fill(path, first_frame, last_frame, selected_count, count_final,
-                       Hp, Wp, before_h, before_w, image_format, highbit, alpha, pad_rgb):
+                       Hp, Wp, before_h, before_w, image_format, highbit, alpha, pad_rgb, reverse=False):
     import av
     canvas = _allocate_canvas(count_final, Hp, Wp, pad_rgb)
     container = av.open(path)
@@ -566,26 +570,27 @@ def _video_decode_fill(path, first_frame, last_frame, selected_count, count_fina
             break
         img = _process_video_frame(frame, state, stream)
         h, w = img.shape[0], img.shape[1]
-        canvas[written, before_h:before_h + h, before_w:before_w + w, :] = img
+        destination = selected_count - 1 - written if reverse else written
+        canvas[destination, before_h:before_h + h, before_w:before_w + w, :] = img
         written += 1
     container.close()
     if written != selected_count:
         raise RuntimeError("video frame range decoded {} frames, expected {}".format(written, selected_count))
     if written < count_final:
-        canvas[written:count_final] = canvas[written - 1]
+        canvas[selected_count:count_final] = canvas[selected_count - 1]
     return canvas
 
 
-def _sequence_decode_fill(names, base, count_final, Hp, Wp, before_h, before_w, pad_rgb):
+def _sequence_decode_fill(names, base, count_final, Hp, Wp, before_h, before_w, pad_rgb, reverse=False):
     canvas = _allocate_canvas(count_final, Hp, Wp, pad_rgb)
-    idx = 0
-    for name in names:
+    selected_count = len(names)
+    for idx, name in enumerate(names):
         img = _load_sequence_image(os.path.join(base, name), pad_rgb)
         h, w = img.shape[0], img.shape[1]
-        canvas[idx, before_h:before_h + h, before_w:before_w + w, :] = img
-        idx += 1
-    if idx < count_final and idx > 0:
-        canvas[idx:count_final] = canvas[idx - 1]
+        destination = selected_count - 1 - idx if reverse else idx
+        canvas[destination, before_h:before_h + h, before_w:before_w + w, :] = img
+    if selected_count < count_final and selected_count > 0:
+        canvas[selected_count:count_final] = canvas[selected_count - 1]
     return canvas
 
 
@@ -613,6 +618,7 @@ class MediaLoadVideoSequence(io.ComfyNode):
                 io.Combo.Input("preset", options=["None", "WAN", "LTX 2.3"]),
                 io.Combo.Input("pad_multiple", options=["2", "8", "16", "32", "64"]),
                 io.Color.Input("pad_color", default="#000000"),
+                io.Boolean.Input("reverse", default=False),
             ],
             outputs=[
                 io.Image.Output(),
@@ -626,7 +632,7 @@ class MediaLoadVideoSequence(io.ComfyNode):
 
     @classmethod
     def execute(cls, source_mode, video_file, path, first_frame, last_frame,
-                output_fps, preset, pad_multiple, pad_color):
+                output_fps, preset, pad_multiple, pad_color, reverse=False):
         pad_color = _normalize_pad_color(pad_color)
         pad_rgb = _hex_to_rgb01(pad_color)
         m = int(pad_multiple)
@@ -661,17 +667,17 @@ class MediaLoadVideoSequence(io.ComfyNode):
         if kind == "video":
             canvas = _video_decode_fill(src_path, range_first, range_last, selected_count,
                                         count_final, Hp, Wp, before_h, before_w,
-                                        image_format, highbit, alpha, pad_rgb)
+                                        image_format, highbit, alpha, pad_rgb, reverse)
         else:
             selected_names = names[range_first:range_last + 1]
             canvas = _sequence_decode_fill(selected_names, src_path, count_final, Hp, Wp,
-                                           before_h, before_w, pad_rgb)
+                                           before_h, before_w, pad_rgb, reverse)
 
         preview_url = None
         target_duration = count_final / fps_out
         audio = _selected_audio(src_path, range_first / source_fps,
-                                selected_count / source_fps, target_duration) if kind == "video" \
-            else _silence_audio(target_duration)
+                                selected_count / source_fps, target_duration) \
+            if kind == "video" and not reverse else _silence_audio(target_duration)
         image = torch.from_numpy(canvas)
         src_fps_str = "n/a" if source_fps is None else "{:.3f}".format(source_fps)
         source_seconds = "n/a" if not source_fps else "{:.3f}s".format(source_count / source_fps)
@@ -682,8 +688,8 @@ class MediaLoadVideoSequence(io.ComfyNode):
                 source_count, source_seconds, W, H, src_fps_str)
             + "selected source range: {}-{} ({} frames)\n".format(range_first, range_last, selected_count)
             + "snapped last frame: {}\n".format(requested_last)
-            + "generated duration: {} frames ({}) / {} @ {}x{} | output fps: {}".format(
-                count_final, preset, generated_seconds, Wp, Hp, fps_out)
+            + "generated duration: {} frames ({}, {}) / {} @ {}x{} | output fps: {}".format(
+                count_final, preset, "reverse" if reverse else "forward", generated_seconds, Wp, Hp, fps_out)
         )
         range_info = {
             "source_fps": source_fps,
@@ -695,13 +701,14 @@ class MediaLoadVideoSequence(io.ComfyNode):
             "generated_count": int(count_final),
             "output_fps": fps_out,
             "preview_url": preview_url,
+            "reverse": bool(reverse),
         }
         return io.NodeOutput(image, fps_out, int(count_final), int(Wp), int(Hp), audio,
                              ui={"text": (status,), "media_range": (range_info,)})
 
     @classmethod
     def fingerprint_inputs(cls, source_mode, video_file, path, first_frame, last_frame,
-                           output_fps, preset, pad_multiple, pad_color):
+                           output_fps, preset, pad_multiple, pad_color, reverse=False):
         pad_color = _normalize_pad_color(pad_color)
         h = hashlib.sha256()
         h.update(str(source_mode).encode("utf-8"))
@@ -711,6 +718,7 @@ class MediaLoadVideoSequence(io.ComfyNode):
         h.update(str(first_frame).encode("utf-8"))
         h.update(str(last_frame).encode("utf-8"))
         h.update(str(output_fps).encode("utf-8"))
+        h.update(str(reverse).encode("utf-8"))
         if source_mode == "upload":
             fp = folder_paths.get_annotated_filepath(video_file)
             h.update(b"\x00"); h.update(fp.encode("utf-8"))
@@ -734,7 +742,7 @@ class MediaLoadVideoSequence(io.ComfyNode):
 
     @classmethod
     def validate_inputs(cls, source_mode, video_file, path, first_frame, last_frame,
-                        output_fps, preset, pad_multiple, pad_color):
+                        output_fps, preset, pad_multiple, pad_color, reverse=False):
         pad_color = _normalize_pad_color(pad_color)
         if (not isinstance(first_frame, int) or isinstance(first_frame, bool) or first_frame < 0):
             return "first_frame must be a non-negative integer"
@@ -747,6 +755,8 @@ class MediaLoadVideoSequence(io.ComfyNode):
             return "output_fps must be a positive finite number"
         if not _HEX_RE.match(pad_color or ""):
             return "pad_color must be #RRGGBB hex (got {!r})".format(pad_color)
+        if not isinstance(reverse, bool):
+            return "reverse must be boolean"
         if source_mode == "upload":
             input_dir = folder_paths.get_input_directory()
             vids = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
