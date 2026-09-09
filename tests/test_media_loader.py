@@ -401,6 +401,7 @@ def test_static():
                 "UploadType.video"):
         assert bad not in src, bad
     assert 'addDOMWidget("status"' in web
+    assert web.count("minWidth: 1") == 2
     assert 'fetch("/media-loader/probe"' in web and 'addEventListener("timeupdate", enforceRange)' in web
     assert "Inspecting source" in web and "live.probe()" in web
     assert 'seekInput.ariaLabel = "Preview timeline"' in web

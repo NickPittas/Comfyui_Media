@@ -15,7 +15,7 @@ function ensureStatusWidget(node) {
     widget = node.addDOMWidget("status", "media-status", element, {
         serialize: false, canvasOnly: false, hideOnZoom: false,
     });
-    widget.computeLayoutSize = () => ({ minHeight: 154, minWidth: 340 });
+    widget.computeLayoutSize = () => ({ minHeight: 154, minWidth: 1 });
     widget.serialize = false;
     renderMessage(node, "Inspecting source…");
     requestAnimationFrame(() => node.setSize?.([
@@ -216,7 +216,7 @@ function installLiveMedia(node) {
         serialize: false, canvasOnly: false, hideOnZoom: false,
     });
     previewWidget.serialize = false;
-    previewWidget.computeLayoutSize = () => ({ minHeight: previewVisible ? 228 : 0, minWidth: 360 });
+    previewWidget.computeLayoutSize = () => ({ minHeight: previewVisible ? 228 : 0, minWidth: 1 });
     let frameCallback;
     let holdAnimation;
     let reverseAnimation;
