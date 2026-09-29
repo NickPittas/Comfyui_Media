@@ -15,6 +15,7 @@ frame count via last-frame freeze:
 """
 import os
 import re
+import sys
 import math
 import asyncio
 import secrets
@@ -35,6 +36,13 @@ from comfy_api.latest import ComfyExtension, io
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
 
 WEB_DIRECTORY = "./web"
+
+try:
+    from .media_video_viewer import MediaVideoViewer
+except ImportError:
+    # Loaded as a bare file without package context (direct-file tests).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from media_video_viewer import MediaVideoViewer
 
 _VIDEO_EXTS = (".mov", ".mp4")
 _SEQUENCE_EXTS = (".exr", ".png", ".tif", ".tiff")
@@ -801,7 +809,7 @@ class MediaLoadVideoSequence(io.ComfyNode):
 
 class MediaLoaderExtension(ComfyExtension):
     async def get_node_list(self):
-        return [MediaLoadVideoSequence]
+        return [MediaLoadVideoSequence, MediaVideoViewer]
 
 
 async def comfy_entrypoint() -> MediaLoaderExtension:

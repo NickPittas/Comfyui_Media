@@ -115,7 +115,10 @@ def test_exr_clamp():
         arr[..., 0] = 1.5   # B
         arr[..., 1] = 0.5   # G
         arr[..., 2] = -0.2  # R (clamps to 0)
-        if not cv2.imwrite(os.path.join(d, "a.exr"), arr):
+        try:
+            if not cv2.imwrite(os.path.join(d, "a.exr"), arr):
+                return "SKIP: OpenCV EXR write unavailable"
+        except cv2.error:
             return "SKIP: OpenCV EXR write unavailable"
         if cv2.imread(os.path.join(d, "a.exr"), cv2.IMREAD_UNCHANGED) is None:
             return "SKIP: OpenCV EXR read unavailable"
@@ -377,7 +380,7 @@ def test_alpha_composite():
 def test_schema():
     ext = asyncio.run(mod.comfy_entrypoint())
     nodes = asyncio.run(ext.get_node_list())
-    assert nodes == [mod.MediaLoadVideoSequence], nodes
+    assert nodes == [mod.MediaLoadVideoSequence, mod.MediaVideoViewer], nodes
     schema = node.define_schema()
     assert schema.node_id == "MediaLoadVideoSequence"
     ids = [i.id for i in schema.inputs]
