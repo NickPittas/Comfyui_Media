@@ -96,7 +96,7 @@ function install(node) {
         color: "var(--fg-color, #ddd)", background: "var(--comfy-input-bg, #181818)",
         font: "12px system-ui, sans-serif",
     });
-    const stage = element("div", box, { position: "relative", width: "100%", aspectRatio: "16 / 9", background: "#000", overflow: "hidden" });
+    const stage = element("div", box, { position: "relative", width: "100%", flex: "0 0 auto", background: "#000", overflow: "hidden" });
     const videoStyle = { position: "absolute", inset: "0", width: "100%", height: "100%", objectFit: "contain" };
     const video = element("video", stage, videoStyle);
     const reference = element("video", stage, { ...videoStyle, pointerEvents: "none" });
@@ -110,14 +110,14 @@ function install(node) {
     video.muted = true;
     reference.muted = true;
     // Timeline seek slider on its own row; frame counter rides along.
-    const controls = element("div", box, { display: "flex", gap: "6px", alignItems: "center", marginTop: "6px" });
+    const controls = element("div", box, { display: "flex", gap: "6px", alignItems: "center", marginTop: "6px", height: "20px", flex: "0 0 auto" });
     const timeline = element("input", controls, { flex: "1", minWidth: "40px" });
     timeline.type = "range"; timeline.min = timeline.max = timeline.value = "0"; timeline.step = "1";
     timeline.disabled = true;
     timeline.ariaLabel = "Video frame";
     const frame = element("span", controls, { whiteSpace: "nowrap" });
     // Icon-only transport row; toggles show pressed state via aria-pressed + accent style.
-    const row = element("div", box, { display: "flex", gap: "5px", alignItems: "center", marginTop: "6px", flexWrap: "wrap" });
+    const row = element("div", box, { display: "flex", gap: "5px", alignItems: "center", marginTop: "6px", height: "48px", flexWrap: "nowrap", overflow: "hidden", flex: "0 0 auto" });
     const setOn = (button, on) => {
         button.setAttribute("aria-pressed", String(on));
         button.style.background = on ? "rgba(106,169,255,0.35)" : "";
@@ -159,128 +159,39 @@ function install(node) {
     };
     setOn(loop, video.loop);
     syncMute();
-    const footer = element("div", box, { display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" });
+    const footer = element("div", box, { display: "flex", gap: "8px", alignItems: "center", marginTop: "6px", height: "18px", overflow: "hidden", flex: "0 0 auto" });
     const saved = element("span", footer, { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-    // Reported height derives from the MEASURED box height (+ small host gutter) instead of a
-    // fixed floor: DOMWidgetImpl.computeLayoutSize reads ONLY getMinHeight/getMaxHeight/
-    // getHeight, so those getters are the whole contract. Until first measure, fall back to
-    // the old 250 floor; measured is kept fresh by the observer/onResize below.
-    let measured = 0;
-    const HOST_GUTTER = 4; // ComfyUI hands the widget row a few px less than asked
-    const heightFor = () => (measured > 0 ? measured : 250) + HOST_GUTTER;
+    // Fixed size contract (MiniMax-Director pattern): the widget DICTATES its height —
+    // widget.computeSize is the highest-precedence branch in litegraph's _arrangeWidgets,
+    // so the slot is fixed (never redistributed) and the node auto-grows to fit the stack.
+    // The DOM is pinned to the same numbers; nothing is measured, nothing can overflow.
+    const CHROME = 116;                // box padding + the three fixed rows below the stage
+    const STAGE_MAX = 320;
+    let aspect = 16 / 9;               // videoWidth / videoHeight; reset when unloaded
+    const stageHeight = () => Math.min(Math.round(((node.size[0] || 360) - 40) / aspect), STAGE_MAX);
+    const widgetHeight = () => stageHeight() + CHROME;
+    const syncLayout = () => {
+        const h = `${stageHeight()}px`;
+        if (stage.style.height !== h) stage.style.height = h;
+        // Pin width too: the Vue-nodes host shrinkwraps content, so width:100% collapses.
+        const w = `${Math.max(0, node.size[0] - 30)}px`;
+        if (box.style.width !== w) box.style.width = w;
+    };
     const widget = node.addDOMWidget("media_video_preview", "video", box, {
-        serialize: false, canvasOnly: false, hideOnZoom: false,
-        getMinHeight: heightFor, getMaxHeight: heightFor, getHeight: heightFor,
+        serialize: false, hideOnZoom: false,
+        getMinHeight: widgetHeight, getMaxHeight: widgetHeight, getHeight: widgetHeight,
     });
     widget.serialize = false;
+    widget.computeSize = () => [0, widgetHeight()];
     for (const event of ["pointerdown", "mousedown", "click", "dblclick", "wheel"])
         box.addEventListener(event, (e) => e.stopPropagation());
-
-    // Vue nodes mode sizes the DOM widget host from its content, so the box's width:100%
-    // resolves against a shrunken host. Pin min-width on the node element and on the box
-    // itself (live node width less padding insets) so the box fills the node; re-applied
-    // on resize via the observer/onResize below.
-    const vueMode = () => Boolean(window.LiteGraph?.vueNodesMode);
-    const syncWidth = () => {
-        if (!vueMode()) return;
-        if (box.style.width) box.style.width = "";
-        const el = document.querySelector(`[data-node-id="${node.id}"]`);
-        if (el && el.style.minWidth !== "340px") el.style.minWidth = "340px";
-        const px = `${Math.max(0, node.size[0] - 12)}px`;
-        if (box.style.minWidth !== px) box.style.minWidth = px;
-    };
-    // Measured-height half of the size contract: raise the node whenever the box changes
-    // height (node width → 16:9/video-aspect stage, controls wrap). Raise-only and only on a
-    // >1px change, so observer/setSize can't ping-pong. Fullscreen balloons the stage to the
-    // viewport, and a popped-out widget lives in another document — adopt neither.
-    const measure = () => {
-        if (document.fullscreenElement?.contains(stage)) return;
-        if (box.ownerDocument !== document) return;
-        const h = box.offsetHeight; // offsetHeight is unscaled; getBoundingClientRect is zoomed
-        if (h < 1) return; // pre-mount or hidden (collapsed)
-        if (Math.abs(h - measured) > 1) measured = h;
-        // The raise is re-checked on every syncLayout, not only when the box's height
-        // changed: a manual node resize shrinks the node without touching the box.
-        const needed = node.computeSize()[1];
-        if (node.size[1] < needed) node.setSize([node.size[0], needed]);
-    };
-    // Vue-mode containment guarantee: the Vue DOM widget host can be laid out outside the
-    // flow node.computeSize() models, so the node border can end above the box bottom
-    // (slider/buttons dangling below the node). Measure real geometry — box bottom vs node
-    // root top via getBoundingClientRect (same viewport scale) — and convert to unscaled
-    // node px with the root's rect/offset ratio. Raise-only: never shrink the user's node
-    // height; minHeight pin is cleared once content fits again. Idempotent assignments keep
-    // observer/onResize callbacks from ping-ponging; no polling of our own.
-    let vuePinned = "";
-    const containVue = () => {
-        if (!vueMode()) return;
-        if (document.fullscreenElement?.contains(stage)) return;
-        if (box.ownerDocument !== document) return;
-        const el = document.querySelector(`[data-node-id="${node.id}"]`);
-        if (!el) return;
-        const rootRect = el.getBoundingClientRect();
-        const boxRect = box.getBoundingClientRect();
-        if (rootRect.width < 1 || rootRect.height < 1 || boxRect.height < 1) return;
-        const scale = rootRect.width / el.offsetWidth || 1;
-        const needed = Math.ceil((boxRect.bottom - rootRect.top) / scale) + 2;
-        if (boxRect.bottom > rootRect.bottom + 1) {
-            const css = `${needed}px`;
-            if (el.style.minHeight !== css) el.style.minHeight = css;
-            vuePinned = css;
-            if (node.size[1] < needed) node.setSize([node.size[0], needed]);
-        } else if (vuePinned && el.style.minHeight === vuePinned) {
-            el.style.minHeight = "";
-            vuePinned = "";
-        }
-    };
-    // Classic canvas mode: DOM widgets are transformed onto the canvas with no flow
-    // layout and no clipping, so a manually shrunk node lets the preview/timeline hang
-    // below the border (containVue only covers Vue nodes mode). LiteGraph's
-    // _arrangeWidgets writes each widget's node-relative y on draw; the preview's y plus
-    // its unzoomed box height plus a small bottom inset is the height the node must
-    // keep. Raise-only: never shrink the user's node.
-    const containClassic = () => {
-        if (vueMode()) return;
-        if (document.fullscreenElement?.contains(stage)) return;
-        if (box.ownerDocument !== document) return;
-        const y = widget.y;
-        if (!Number.isFinite(y) || box.offsetHeight < 1) return; // not laid out yet / hidden
-        // +12: LiteGraph positions actual content ~10px below widget.y (DEFAULT_MARGIN),
-        // and box measures the widget box, not the DOM controls hanging out of it.
-        const needed = Math.ceil(y + box.offsetHeight) + 12;
-        if (node.size[1] < needed) node.setSize([node.size[0], needed]);
-    };
-    const syncLayout = () => { syncWidth(); measure(); containVue(); containClassic(); };
-    const widthObserver = new ResizeObserver(syncLayout);
-    widthObserver.observe(box);
     const origOnResize = node.onResize;
     node.onResize = function (...args) {
         origOnResize?.apply(this, args);
         syncLayout();
     };
-    // widget.y only exists after LiteGraph's first layout pass draws the node; retry
-    // syncLayout for a few animation frames, then stop — the observer/onResize callbacks
-    // cover everything after (no polling).
-    let rafHandle = 0;
-    let layoutRetries = 0;
-    const syncWhenLaidOut = () => {
-        cancelAnimationFrame(rafHandle);
-        layoutRetries = 12;
-        const step = () => {
-            rafHandle = 0;
-            syncLayout();
-            // LiteGraph initializes widget.y = 0 before the first layout pass, so
-            // "finite" alone stops the retry too early; treat y <= 0 as not laid out.
-            if (layoutRetries > 0 && !(widget.y > 0)) {
-                --layoutRetries;
-                rafHandle = requestAnimationFrame(step);
-            }
-        };
-        rafHandle = requestAnimationFrame(step);
-    };
-    node.__mediaVideoSync = syncWhenLaidOut;
     syncLayout();
-    syncWhenLaidOut();
+    node.setSize?.([Math.max(node.size[0], 360), Math.max(node.size[1], node.computeSize()[1])]);
 
     let fps = 24;
     let frames = 0;
@@ -355,7 +266,15 @@ function install(node) {
     video.addEventListener("pause", () => { syncPlay(false); sync(); });
     reference.addEventListener("loadedmetadata", () => sync(true));
     video.addEventListener("loadedmetadata", () => {
-        if (video.videoWidth && video.videoHeight) stage.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+        if (video.videoWidth && video.videoHeight) {
+            aspect = video.videoWidth / video.videoHeight;
+            syncLayout();
+            // Tell litegraph the slot changed; arrange() grows the node on the next draw.
+            node._widgetSlotsDirty = true;
+            node.setDirtyCanvas?.(true, true);
+            const needed = node.computeSize()[1];
+            if (node.size[1] < needed) node.setSize([node.size[0], needed]);
+        }
         sync(true);
         video.play().catch(() => {});
     });
@@ -377,6 +296,7 @@ function install(node) {
         serialize: false, getMinHeight: browseH, getMaxHeight: browseH, getHeight: browseH,
     });
     browseWidget.serialize = false;
+    browseWidget.computeSize = () => [0, 32];
     // Browse edits `subfolder`/`output_root`; put it directly above `subfolder`.
     const browseAt = node.widgets.indexOf(browseWidget);
     const subfolderAt = node.widgets.findIndex((w) => w.name === "subfolder");
@@ -386,8 +306,6 @@ function install(node) {
     }
     const onRemoved = node.onRemoved;
     node.onRemoved = function () {
-        cancelAnimationFrame(rafHandle);
-        widthObserver.disconnect();
         closeBrowser?.();
         video.pause(); reference.pause();
         video.removeAttribute("src"); reference.removeAttribute("src");
@@ -406,7 +324,8 @@ function install(node) {
         download.removeAttribute("href");
         download.style.display = "none";
         empty.style.display = "grid";
-        stage.style.aspectRatio = "16 / 9";
+        aspect = 16 / 9;
+        syncLayout();
         frame.textContent = "–";
         display();
     };
@@ -461,7 +380,6 @@ app.registerExtension({
             onConfigure?.apply(this, arguments);
             // Preview tokens don't survive reload; reset the viewer and restore layout size.
             this.__mediaVideoViewer?.(null);
-            this.__mediaVideoSync?.();
             requestAnimationFrame(() => this.setSize?.([
                 Math.max(this.size[0], 360), Math.max(this.size[1], this.computeSize?.()[1] ?? this.size[1]),
             ]));
