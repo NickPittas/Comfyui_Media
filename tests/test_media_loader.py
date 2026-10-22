@@ -8,9 +8,11 @@ import sys
 import json
 import math
 import asyncio
+import shutil
 import tempfile
 import traceback
 import subprocess
+from unittest import mock
 
 COMFY_ROOT = "/home/npittas/ComfyUI-Easy-Install/ComfyUI-Easy-Install/ComfyUI"
 if COMFY_ROOT not in sys.path:
@@ -433,6 +435,46 @@ def test_broken_chapter_proxy():
     return "broken QuickTime chapter metadata stripped; H.264 proxy decodes non-black"
 
 
+def test_multichannel_browser_preview_audio():
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        return "SKIP: ffmpeg/ffprobe unavailable"
+
+    with tempfile.TemporaryDirectory(dir=PKG) as d:
+        source = os.path.join(d, "surround.mov")
+        subprocess.run([
+            ffmpeg, "-nostdin", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x48:r=25:d=0.5",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=5.0",
+            "-map", "0:v:0", "-map", "1:a:0", "-t", "0.5",
+            "-c:v", "mpeg4", "-c:a", "pcm_s16le", source,
+        ], check=True)
+
+        def streams(path):
+            result = subprocess.run([
+                ffprobe, "-v", "error", "-show_entries",
+                "stream=codec_type,codec_name,channels,channel_layout", "-of", "json", path,
+            ], check=True, capture_output=True, text=True)
+            return json.loads(result.stdout)["streams"]
+
+        source_audio = [stream for stream in streams(source) if stream["codec_type"] == "audio"]
+        assert len(source_audio) == 1 and source_audio[0]["channels"] == 5, source_audio
+        assert source_audio[0]["channel_layout"] == "5.0", source_audio
+
+        with mock.patch.object(mod.folder_paths, "get_temp_directory", return_value=d):
+            preview = mod._browser_preview_path(source, "prores")
+
+        preview_streams = streams(preview)
+        preview_audio = [stream for stream in preview_streams if stream["codec_type"] == "audio"]
+        assert len(preview_audio) == 1, preview_audio
+        assert preview_audio[0]["codec_name"] == "aac" and preview_audio[0]["channels"] == 2, preview_audio
+        assert any(stream["codec_type"] == "video" and stream["codec_name"] == "h264"
+                   for stream in preview_streams), preview_streams
+        assert [stream for stream in streams(source) if stream["codec_type"] == "audio"] == source_audio
+    return "5-channel 5.0 MOV previews as H.264 video with stereo AAC; source audio is unchanged"
+
+
 def test_arch_path_mode():
     sample = "/home/npittas/Videos/DJI_20260506101937_0162_D.MOV"
     if not os.path.exists(sample):
@@ -452,7 +494,7 @@ TESTS = [
     test_mp4, test_audio_output, test_reverse, test_rotation, test_highbit_alignment, test_highbit_policy,
     test_fps_independence, test_frame_range_and_duration, test_output_fps_validation, test_padding,
     test_alpha_composite, test_schema, test_static, test_broken_chapter_proxy,
-    test_arch_path_mode, test_ui_smoke,
+    test_arch_path_mode, test_ui_smoke, test_multichannel_browser_preview_audio,
 ]
 
 

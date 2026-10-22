@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import math
+import json
 import asyncio
 import secrets
 import shutil
@@ -76,7 +77,7 @@ def _browser_preview_path(path, codec):
     if not ffmpeg:
         raise ValueError("ffmpeg is required to preview {} video in browser".format(codec))
     stat = os.stat(path)
-    key = hashlib.sha256("v2:{}:{}:{}".format(os.path.realpath(path), stat.st_mtime_ns, stat.st_size).encode()).hexdigest()[:20]
+    key = hashlib.sha256("v3:{}:{}:{}".format(os.path.realpath(path), stat.st_mtime_ns, stat.st_size).encode()).hexdigest()[:20]
     temp_dir = folder_paths.get_temp_directory()
     os.makedirs(temp_dir, exist_ok=True)
     output = os.path.join(temp_dir, "media_loader_live_{}.mp4".format(key))
@@ -85,10 +86,10 @@ def _browser_preview_path(path, codec):
             return output
         partial = output + ".part.mp4"
         command = [ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", path,
-                   "-map", "0:v:0", "-map", "0:a?", "-map_metadata", "-1", "-map_chapters", "-1", "-vf",
+                   "-map", "0:v:0", "-map", "0:a:0?", "-map_metadata", "-1", "-map_chapters", "-1", "-vf",
                    "scale={0}:{0}:force_original_aspect_ratio=decrease:force_divisible_by=2".format(_PREVIEW_MAX_DIM),
                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                   "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
                    "-movflags", "+faststart", partial]
         try:
             result = subprocess.run(command, capture_output=True, text=True)
@@ -510,16 +511,27 @@ def _silence_audio(duration, sample_rate=44100, channels=2):
 
 
 def _selected_audio(path, start, source_duration, target_duration):
-    import av
-
     if not os.path.isfile(path):
         return _silence_audio(target_duration)
-    with av.open(path) as container:
-        if not container.streams.audio:
-            return _silence_audio(target_duration)
-        stream = container.streams.audio[0]
-        sample_rate = int(stream.codec_context.sample_rate or 44100)
-        channels = int(stream.channels or 2)
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise RuntimeError("ffprobe is required for selected audio output")
+    metadata = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries",
+         "stream=sample_rate,channels", "-of", "json", path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if metadata.returncode:
+        raise RuntimeError("ffprobe audio metadata probe failed: {}".format(
+            metadata.stderr.strip()))
+    try:
+        streams = json.loads(metadata.stdout).get("streams", [])
+    except (json.JSONDecodeError, AttributeError) as error:
+        raise RuntimeError("ffprobe returned invalid audio metadata: {}".format(
+            metadata.stderr.strip() or error)) from error
+    if not streams:
+        return _silence_audio(target_duration)
+    sample_rate = int(streams[0].get("sample_rate") or 44100)
+    channels = int(streams[0].get("channels") or 2)
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required for selected audio output")
