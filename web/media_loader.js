@@ -6,16 +6,18 @@ function ensureStatusWidget(node) {
     if (widget) return widget;
     const element = document.createElement("section");
     Object.assign(element.style, {
-        width: "100%", maxWidth: "100%", minWidth: "0", padding: "8px",
+        width: "100%", minWidth: "0", padding: "8px",
         color: "var(--fg-color, #ddd)", background: "var(--comfy-input-bg, #181818)",
         border: "1px solid var(--border-color, #444)", borderRadius: "7px",
         font: "11px ui-monospace, SFMono-Regular, Menlo, monospace",
         boxSizing: "border-box", overflow: "hidden", pointerEvents: "none",
     });
+    const statusHeight = () => 154;
     widget = node.addDOMWidget("status", "media-status", element, {
         serialize: false, canvasOnly: false, hideOnZoom: false,
+        getMinHeight: statusHeight, getMaxHeight: statusHeight, getHeight: statusHeight,
     });
-    widget.computeLayoutSize = () => ({ minHeight: 154, minWidth: 1 });
+    widget.computeSize = () => [0, statusHeight()];
     widget.serialize = false;
     renderMessage(node, "Inspecting source…");
     requestAnimationFrame(() => node.setSize?.([
@@ -204,7 +206,7 @@ function installLiveMedia(node) {
         border: "1px solid var(--border-color, #444)",
     });
     Object.assign(videoStage.style, {
-        flex: "1 1 auto", minHeight: "180px", minWidth: "0", overflow: "hidden", background: "#000",
+        flex: "0 0 auto", height: "180px", minHeight: "180px", minWidth: "0", overflow: "hidden", background: "#000",
     });
     Object.assign(video.style, { display: "block", width: "100%", height: "100%", objectFit: "contain" });
     video.playsInline = true;
@@ -212,11 +214,23 @@ function installLiveMedia(node) {
     videoStage.append(video);
     previewContainer.append(videoStage);
     node.videoContainer = previewContainer;
+    let aspect = 16 / 9;
+    const stageHeight = () => Math.max(180, Math.min(320, Math.round(((node.size[0] || 360) - 40) / aspect)));
+    const previewHeight = () => previewVisible ? stageHeight() + 48 : 0;
     const previewWidget = node.addDOMWidget("media_preview", "video", previewContainer, {
         serialize: false, canvasOnly: false, hideOnZoom: false,
+        getMinHeight: () => previewHeight(), getMaxHeight: () => previewHeight(), getHeight: () => previewHeight(),
     });
     previewWidget.serialize = false;
-    previewWidget.computeLayoutSize = () => ({ minHeight: previewVisible ? 228 : 0, minWidth: 1 });
+    previewWidget.computeSize = () => [0, previewHeight()];
+    const syncLayout = () => {
+        const width = `${Math.max(0, node.size[0] - 30)}px`;
+        const height = `${stageHeight()}px`;
+        if (previewContainer.style.width !== width) previewContainer.style.width = width;
+        if (videoStage.style.height !== height) videoStage.style.height = height;
+        const status = node.widgets?.find((w) => w.name === "status")?.element;
+        if (status && status.style.width !== width) status.style.width = width;
+    };
     let frameCallback;
     let holdAnimation;
     let reverseAnimation;
@@ -419,8 +433,14 @@ function installLiveMedia(node) {
         if (video?.requestVideoFrameCallback) frameCallback = video.requestVideoFrameCallback(monitorFrames);
     };
     const applyPreview = () => {
+        const wasVisible = previewVisible;
         previewVisible = Boolean(info?.preview_url);
         previewContainer.style.display = previewVisible ? "flex" : "none";
+        syncLayout();
+        if (previewVisible !== wasVisible) {
+            node._widgetSlotsDirty = true;
+            node.setDirtyCanvas?.(true, true);
+        }
         requestAnimationFrame(() => node.setSize?.([
             Math.max(node.size[0], 360), Math.max(node.size[1], node.computeSize()[1]),
         ]));
@@ -448,8 +468,24 @@ function installLiveMedia(node) {
     video.addEventListener("play", updateControls);
     video.addEventListener("pause", updateControls);
     video.addEventListener("volumechange", updateControls);
+    video.addEventListener("loadedmetadata", () => {
+        if (!video.videoWidth || !video.videoHeight) return;
+        aspect = video.videoWidth / video.videoHeight;
+        syncLayout();
+        node._widgetSlotsDirty = true;
+        node.setDirtyCanvas?.(true, true);
+        const needed = node.computeSize()[1];
+        if (node.size[1] < needed) node.setSize([node.size[0], needed]);
+    });
     attachControls();
     if (video.requestVideoFrameCallback) frameCallback = video.requestVideoFrameCallback(monitorFrames);
+
+    const onResize = node.onResize;
+    node.onResize = function (...args) {
+        onResize?.apply(this, args);
+        syncLayout();
+    };
+    syncLayout();
 
     const payload = () => ({
         source_mode: widget(node, "source_mode").value,
